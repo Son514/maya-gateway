@@ -75,6 +75,14 @@
 <script>
 const $ = (id) => document.getElementById(id);
 
+function store(key, value) {
+  try {
+    localStorage.setItem(key, value);
+  } catch (e) {
+    /* private mode or storage disabled; the result page falls back to manual input */
+  }
+}
+
 function uuid() {
   if (crypto.randomUUID) return crypto.randomUUID();
   return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
@@ -150,6 +158,9 @@ $('pay').addEventListener('click', async () => {
     $('redirectUrl').href = body.redirectUrl;
     $('rrn').textContent = rrn;
     $('out').hidden = false;
+
+    store('checkoutId', body.checkoutId);
+    store('requestReferenceNumber', rrn);
 
     let n = 3;
     $('count').textContent = '(' + n + ')';

@@ -1,7 +1,6 @@
 package main
 
-// TODO: US-202: Call Maya's "Create Checkout" API
-
+// TODO: US-203: Call Maya's "Get Checkout Status" API
 import (
 	"embed"
 	"errors"
@@ -52,6 +51,23 @@ func checkoutMaya(maya *models.Maya) gin.HandlerFunc {
 	}
 }
 
+func checkoutStatusMaya(maya *models.Maya) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		checkout, err := maya.GetCheckout(c.Request.Context(), c.Param("id"))
+		if err != nil {
+			var apiErr *models.APIError
+			if errors.As(err, &apiErr) {
+				c.JSON(apiErr.StatusCode, gin.H{"error": apiErr.Body})
+				return
+			}
+			c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+			return
+		}
+
+		c.JSON(http.StatusOK, checkout)
+	}
+}
+
 func main() {
 	if err := godotenv.Load(); err != nil {
 		log.Fatalf("load .env: %v", err)
@@ -67,6 +83,7 @@ func main() {
 
 	checkout := router.Group("/checkout")
 	checkout.POST("/v1/checkouts", checkoutMaya(maya))
+	checkout.GET("/v1/checkouts/:id", checkoutStatusMaya(maya))
 
 	result := servePage("result.html")
 	router.GET("/", servePage("index.html"))

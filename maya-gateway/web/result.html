@@ -22,8 +22,28 @@
   p { margin: .4rem 0; font-size: .9rem; color: #555; }
   code { background: #eef0f3; padding: .15rem .35rem; border-radius: 4px; font-size: .82rem; word-break: break-all; }
   a { color: #018ff4; }
-  .warn { margin-top: 1.5rem; padding: .7rem; background: #fff8e1; border-left: 3px solid #f9a825;
-          border-radius: 4px; font-size: .78rem; text-align: left; color: #6b5400; }
+  .lookup { margin-top: 1.5rem; padding-top: 1.25rem; border-top: 1px solid #e4e6ea; text-align: left; }
+  .lookup h2 { font-size: .8rem; margin: 0 0 .5rem; color: #555; }
+  .lookup input {
+    width: 100%; padding: .5rem .6rem; font-size: .85rem; box-sizing: border-box;
+    border: 1px solid #d0d4da; border-radius: 6px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  .lookup button {
+    width: 100%; margin-top: .5rem; padding: .55rem; font-size: .85rem; font-weight: 600;
+    color: #fff; background: #018ff4; border: 0; border-radius: 6px; cursor: pointer;
+  }
+  .lookup button:disabled { background: #9bb8cf; cursor: not-allowed; }
+  .status { margin-top: 1rem; text-align: left; }
+  .status table { width: 100%; border-collapse: collapse; font-size: .82rem; }
+  .status th, .status td { text-align: left; padding: .3rem .5rem .3rem 0; vertical-align: top; }
+  .status th { color: #555; font-weight: 600; width: 42%; white-space: nowrap; }
+  .status td { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; word-break: break-all; }
+  .pill { display: inline-block; padding: .1rem .45rem; border-radius: 999px; font-weight: 600; font-size: .78rem; }
+  .pill.ok { background: #e6f4ea; color: #137333; }
+  .pill.bad { background: #fdecea; color: #d93025; }
+  .pill.wait { background: #fff8e1; color: #6b5400; }
+  .err { margin-top: 1rem; padding: .7rem; background: #fdecea; border-left: 3px solid #d93025;
+         border-radius: 4px; font-size: .8rem; text-align: left; white-space: pre-wrap; word-break: break-word; }
 </style>
 </head>
 <body>
@@ -34,14 +54,84 @@
   <p>requestReferenceNumber<br><code id="rrn">—</code></p>
   <p><a href="/">Start over</a></p>
 
-  <div class="warn" id="warn" hidden>
-    The redirect landing here only confirms which URL Maya sent the browser to.
-    It does not query Maya for the settled transaction status — no retrieval
-    endpoint is implemented yet.
+  <div class="lookup">
+    <h2>Checkout status</h2>
+    <input id="cid" type="text" placeholder="checkoutId" spellcheck="false" autocomplete="off">
+    <button id="check">Check status</button>
+    <div id="status" class="status" hidden></div>
+    <div id="err" class="err" hidden></div>
   </div>
 </div>
 
 <script>
+const $ = (id) => document.getElementById(id);
+
+function read(key) {
+  try {
+    return localStorage.getItem(key) || '';
+  } catch (e) {
+    return '';
+  }
+}
+
+function badge(value) {
+  if (value === 'PAYMENT_SUCCESS') return '<span class="pill ok">' + value + '</span>';
+  if (value === 'PAYMENT_FAILED' || value === 'PAYMENT_EXPIRED' || value === 'PAYMENT_CANCELLED') {
+    return '<span class="pill bad">' + value + '</span>';
+  }
+  return '<span class="pill wait">' + (value || '—') + '</span>';
+}
+
+async function lookup(id) {
+  const btn = $('check');
+  const err = $('err');
+  const out = $('status');
+
+  id = (id || '').trim();
+  if (!id) {
+    err.hidden = false;
+    err.textContent = 'Enter a checkoutId first.';
+    return;
+  }
+
+  btn.disabled = true;
+  btn.textContent = 'Checking…';
+  err.hidden = true;
+  out.hidden = true;
+
+  try {
+    const res = await fetch('/checkout/v1/checkouts/' + encodeURIComponent(id));
+    const body = await res.json();
+
+    if (!res.ok) {
+      err.hidden = false;
+      err.textContent = 'Gateway returned ' + res.status + '\n' + (body.error || JSON.stringify(body));
+      return;
+    }
+
+    const amount = body.totalAmount
+      ? body.totalAmount.amount + ' ' + (body.totalAmount.currency || '')
+      : '—';
+
+    out.innerHTML =
+      '<table>' +
+      '<tr><th>checkoutId</th><td>' + body.id + '</td></tr>' +
+      '<tr><th>status</th><td>' + body.status + '</td></tr>' +
+      '<tr><th>paymentStatus</th><td>' + badge(body.paymentStatus) + '</td></tr>' +
+      '<tr><th>totalAmount</th><td>' + amount + '</td></tr>' +
+      '<tr><th>createdAt</th><td>' + (body.createdAt || '—') + '</td></tr>' +
+      '<tr><th>expiredAt</th><td>' + (body.expiredAt || '—') + '</td></tr>' +
+      '</table>';
+    out.hidden = false;
+  } catch (e) {
+    err.hidden = false;
+    err.textContent = 'Request failed: ' + e.message;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Check status';
+  }
+}
+
 const params = new URLSearchParams(location.search);
 const path = location.pathname.replace(/\/$/, '');
 
@@ -56,8 +146,16 @@ const o = outcomes[path] || { icon: 'ℹ️', title: 'Unknown result', msg: 'Unr
 document.getElementById('icon').textContent = o.icon;
 document.getElementById('title').textContent = o.title;
 document.getElementById('msg').textContent = o.msg;
-document.getElementById('rrn').textContent = params.get('id') || 'not provided';
-document.getElementById('warn').hidden = false;
+document.getElementById('rrn').textContent = params.get('id') || read('requestReferenceNumber') || 'not provided';
+
+const stored = read('checkoutId');
+$('cid').value = stored;
+$('check').addEventListener('click', () => lookup($('cid').value));
+$('cid').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') lookup($('cid').value);
+});
+
+if (stored) lookup(stored);
 </script>
 </body>
 </html>

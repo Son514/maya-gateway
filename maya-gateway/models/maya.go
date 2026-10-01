@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -130,6 +131,29 @@ type CheckoutResponse struct {
 	RedirectURL string `json:"redirectUrl"`
 }
 
+type CheckoutTotalAmount struct {
+	Amount   string         `json:"amount"`
+	Currency string         `json:"currency"`
+	Details  *AmountDetails `json:"details,omitempty"`
+}
+
+type CheckoutStatusResponse struct {
+	ID                         string               `json:"id"`
+	Status                     string               `json:"status"`
+	PaymentStatus              string               `json:"paymentStatus"`
+	RequestReferenceNumber     string               `json:"requestReferenceNumber"`
+	TransactionReferenceNumber string               `json:"transactionReferenceNumber,omitempty"`
+	ReceiptNumber              string               `json:"receiptNumber,omitempty"`
+	TotalAmount                *CheckoutTotalAmount `json:"totalAmount,omitempty"`
+	Items                      []Item               `json:"items,omitempty"`
+	Metadata                   *Metadata            `json:"metadata,omitempty"`
+	PaymentDetails             map[string]any       `json:"paymentDetails,omitempty"`
+	RefundedAmount             string               `json:"refundedAmount,omitempty"`
+	CreatedAt                  string               `json:"createdAt"`
+	UpdatedAt                  string               `json:"updatedAt"`
+	ExpiredAt                  string               `json:"expiredAt,omitempty"`
+}
+
 type APIError struct {
 	StatusCode int
 	Body       string
@@ -139,19 +163,16 @@ func (e *APIError) Error() string {
 	return fmt.Sprintf("maya: unexpected status %d: %s", e.StatusCode, e.Body)
 }
 
-func (m *Maya) CreateCheckout(ctx context.Context, req CreateCheckoutRequest) (*CheckoutResponse, error) {
-	body, err := json.Marshal(req)
+func (m *Maya) do(ctx context.Context, method, path, key string, body io.Reader) ([]byte, error) {
+	httpReq, err := http.NewRequestWithContext(ctx, method, m.BaseURL+path, body)
 	if err != nil {
 		return nil, err
 	}
-
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, m.BaseURL+"/checkout/v1/checkouts", bytes.NewReader(body))
-	if err != nil {
-		return nil, err
+	if body != nil {
+		httpReq.Header.Set("Content-Type", "application/json")
 	}
-	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Accept", "application/json")
-	httpReq.SetBasicAuth(m.PublicKey, "")
+	httpReq.SetBasicAuth(key, "")
 
 	res, err := m.HTTPClient.Do(httpReq)
 	if err != nil {
@@ -168,7 +189,37 @@ func (m *Maya) CreateCheckout(ctx context.Context, req CreateCheckoutRequest) (*
 		return nil, &APIError{StatusCode: res.StatusCode, Body: string(resBody)}
 	}
 
+	return resBody, nil
+}
+
+// Returns Maya's response (including checkoutId and redirectUrl) to the caller.
+func (m *Maya) CreateCheckout(ctx context.Context, req CreateCheckoutRequest) (*CheckoutResponse, error) {
+	body, err := json.Marshal(req)
+	if err != nil {
+		return nil, err
+	}
+
+	resBody, err := m.do(ctx, http.MethodPost, "/checkout/v1/checkouts", m.PublicKey, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+
 	var checkout CheckoutResponse
+	if err := json.Unmarshal(resBody, &checkout); err != nil {
+		return nil, err
+	}
+
+	return &checkout, nil
+}
+
+// Returns Maya's checkout status for the given checkoutId to the caller.
+func (m *Maya) GetCheckout(ctx context.Context, id string) (*CheckoutStatusResponse, error) {
+	resBody, err := m.do(ctx, http.MethodGet, "/checkout/v1/checkouts/"+url.PathEscape(id), m.SecretKey, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	var checkout CheckoutStatusResponse
 	if err := json.Unmarshal(resBody, &checkout); err != nil {
 		return nil, err
 	}

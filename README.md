@@ -25,7 +25,7 @@ reads from the process working directory, so the binary must be run from inside 
 |---|---|---|
 | `MAYA_BASE_URL` | Yes | Maya API host. Sandbox: `https://pg-sandbox.paymaya.com`, production: `https://pg.paymaya.com` |
 | `MAYA_PUBLIC_KEY` | Yes | Public API key (`pk-...`). Used for Basic auth on checkout endpoints. |
-| `MAYA_SECRET_KEY` | Yes | Secret API key (`sk-...`). Stored on the client for endpoints that require it. |
+| `MAYA_SECRET_KEY` | Yes | Secret API key (`sk-...`). Used for Basic auth on Get Checkout. |
 
 The app exits at startup if `.env` cannot be read.
 
@@ -49,12 +49,14 @@ These exist for manual testing. They are not part of the payment API.
 | Route | Purpose |
 |---|---|
 | `GET /` | Checkout page. Creates a checkout and redirects to Maya's hosted page |
-| `GET /success` | Maya's `redirectUrl.success` target. Shows the outcome and request reference |
+| `GET /success` | Maya's `redirectUrl.success` target. Shows the outcome plus live checkout status |
 | `GET /failure` | Maya's `redirectUrl.failure` target |
 | `GET /cancel` | Maya's `redirectUrl.cancel` target |
 
-The result pages only report which URL Maya redirected the browser to. They do not query Maya for
-the settled transaction status.
+The result pages report which URL Maya redirected the browser to, then query Get Checkout to show
+the actual `status` and `paymentStatus` from Maya. The `checkoutId` is carried across in
+`localStorage`; if it is missing (different browser, cleared storage) the page falls back to a
+manual lookup box, which is also the easiest way to re-inspect an earlier or expired checkout.
 
 ### Sandbox test cards
 
@@ -142,10 +144,62 @@ creation.
 | `4xx` / `5xx` from Maya | Relayed verbatim with Maya's status code and error body |
 | `502` | The upstream call failed or the response could not be decoded |
 
+### Get Checkout
+
+```
+GET /checkout/v1/checkouts/:id
+```
+
+Proxies to `GET {MAYA_BASE_URL}/checkout/v1/checkouts/{id}` where `:id` is the `checkoutId` returned
+by Create Checkout.
+
+**This endpoint authenticates with the secret key**, unlike Create Checkout which uses the public
+key. Sending the public key returns `401` with Maya code `K004`.
+
+```bash
+curl http://127.0.0.1:8080/checkout/v1/checkouts/14f3571f-7e3d-426f-9f43-64a020c7b48d
+```
+
+**Response — `200 OK`**
+
+```json
+{
+  "id": "14f3571f-7e3d-426f-9f43-64a020c7b48d",
+  "status": "CREATED",
+  "paymentStatus": "PENDING_TOKEN",
+  "requestReferenceNumber": "5fc10b93-bdbd-4f31-b31d-4575a3785009",
+  "totalAmount": { "amount": "1000", "currency": "PHP" },
+  "items": [{ "name": "Canvas Slip Ons", "totalAmount": { "value": 1000 } }],
+  "refundedAmount": "0",
+  "createdAt": "2026-10-01T14:25:22.926Z",
+  "updatedAt": "2026-10-01T14:25:22.926Z",
+  "expiredAt": "2026-10-01T15:25:22.926Z"
+}
+```
+
+Note that `totalAmount` comes back as `amount` (a **string**), not `value` (a number) as it does on
+the Create Checkout request. `totalAmount.details`, `metadata`, `paymentDetails`, and
+`transactionReferenceNumber` are omitted from the response when Maya returns them empty. `items` keep
+the same `value` shape used on the request.
+
+**Errors**
+
+| Status | Cause |
+|---|---|
+| `400` | `:id` is not a UUID v4. Maya code `2553` |
+| `404` | No checkout with that ID. Maya code `PY0009` |
+| `4xx` / `5xx` from Maya | Relayed verbatim with Maya's status code and error body |
+| `502` | The upstream call failed or the response could not be decoded |
+
 ## Notes
 
 - Amounts are sent as JSON numbers. Maya's docs show string values in examples (`"1000.00"`), but
   numbers are accepted and avoid floating-point formatting issues.
-- Checkout sessions expire 1 hour after creation. Retrieve payment status via
-  `GET /payments/v1/payments/{paymentId}` using the secret key.
-- Only Create Checkout is implemented. Webhooks, voids, refunds, and payment retrieval are not.
+- Checkout sessions expire 1 hour after creation. A checkout that is never paid shows `status`
+  `CREATED` with `paymentStatus` `PENDING_TOKEN`, then drops to `EXPIRED`.
+- The gateway implements Create Checkout and Get Checkout only. Webhooks, voids, refunds, and
+  captures are not implemented. Get Checkout is a status fallback for when webhooks are not set up;
+  it polls a single checkout on demand.
+- `GET /payments/v1/payments/{paymentId}` and `GET /payments/v1/payments/{paymentId}/status` are
+  Maya's newer payment retrieval endpoints. Both are reachable from the same client, but only
+  `/checkout/v1/checkouts/{id}` is proxied today.
