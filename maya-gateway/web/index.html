@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Maya Gateway — Checkout</title>
+<style>
+  :root { color-scheme: light dark; }
+  body {
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    margin: 0; min-height: 100vh;
+    display: flex; align-items: center; justify-content: center;
+    background: #f4f5f7; color: #1a1d21;
+  }
+  .card {
+    background: #fff; padding: 2rem; border-radius: 12px;
+    width: min(440px, 92vw);
+    box-shadow: 0 1px 3px rgba(0,0,0,.12), 0 8px 24px rgba(0,0,0,.06);
+  }
+  h1 { font-size: 1.25rem; margin: 0 0 1.25rem; }
+  label { display: block; font-size: .8rem; font-weight: 600; margin-bottom: .3rem; color: #555; }
+  input {
+    width: 100%; padding: .55rem .65rem; font-size: 1rem;
+    border: 1px solid #d0d4da; border-radius: 6px; margin-bottom: 1rem;
+    box-sizing: border-box;
+  }
+  button {
+    width: 100%; padding: .7rem; font-size: 1rem; font-weight: 600;
+    color: #fff; background: #018ff4; border: 0; border-radius: 6px;
+    cursor: pointer;
+  }
+  button:disabled { background: #9bb8cf; cursor: not-allowed; }
+  .err { margin-top: 1rem; padding: .7rem; background: #fdecea; border-left: 3px solid #d93025;
+         border-radius: 4px; font-size: .85rem; white-space: pre-wrap; word-break: break-word; }
+  .err strong { display: block; margin-bottom: .25rem; }
+  .pending { margin-top: 1.25rem; font-size: .9rem; }
+  .pending code, .out code { background: #eef0f3; padding: .15rem .35rem; border-radius: 4px; font-size: .82rem; word-break: break-all; }
+  .out { margin-top: 1.25rem; padding-top: 1.25rem; border-top: 1px solid #e4e6ea; font-size: .85rem; }
+  .out p { margin: .4rem 0; }
+  .out a { color: #018ff4; }
+  .note { margin-top: 1.5rem; padding-top: 1rem; border-top: 1px solid #e4e6ea; font-size: .78rem; color: #666; }
+  .note b { color: #444; }
+  .count { color: #666; font-size: .8rem; }
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>Canvas Slip Ons</h1>
+
+  <label for="amount">Amount (PHP)</label>
+  <input id="amount" type="number" value="1000" min="1" step="1">
+
+  <button id="pay">Pay with Maya</button>
+
+  <div id="err" class="err" hidden></div>
+  <div id="pending" class="pending" hidden>
+    Redirecting to Maya checkout&hellip; <span id="count" class="count"></span><br>
+    <span class="count">Cancel to inspect the gateway response below.</span>
+  </div>
+
+  <div id="out" class="out" hidden>
+    <p><b>checkoutId</b><br><code id="checkoutId"></code></p>
+    <p><b>redirectUrl</b><br><a id="redirectUrl" href="#" target="_blank" rel="noopener"></a></p>
+    <p><b>requestReferenceNumber</b><br><code id="rrn"></code></p>
+  </div>
+
+  <div class="note">
+    <b>Sandbox test cards</b> (the cards in Maya's docs are expired as of 2026):<br>
+    <code>5204 2404 9566 9629</code> &middot; 12/2031 &middot; CVV 111 &rarr; success<br>
+    <code>5453 0100 0006 4154</code> &middot; 12/2030 &middot; CVV 111 &middot; 3DS passkey <code>secbarry1</code><br>
+    <code>4917 6100 0000 0000</code> &middot; 12/2030 &middot; CVV 888 &middot; passkey <code>paymaya88</code> &rarr; insufficient funds
+  </div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+
+function uuid() {
+  if (crypto.randomUUID) return crypto.randomUUID();
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+    const r = crypto.getRandomValues(new Uint8Array(1))[0] % 16;
+    return (c === 'x' ? r : ((r & 0x3) | 0x8)).toString(16);
+  });
+}
+
+$('pay').addEventListener('click', async () => {
+  const btn = $('pay');
+  const value = parseFloat($('amount').value);
+
+  if (!value || value <= 0) {
+    const err = $('err');
+    err.hidden = false;
+    err.innerHTML = '<strong>Invalid amount</strong>Enter a positive number.';
+    return;
+  }
+
+  btn.disabled = true;
+  btn.textContent = 'Creating checkout…';
+  $('err').hidden = true;
+  $('out').hidden = true;
+  $('pending').hidden = true;
+
+  const rrn = uuid();
+  const base = location.origin;
+
+  const payload = {
+    totalAmount: { value, currency: 'PHP' },
+    items: [{
+      name: 'Canvas Slip Ons',
+      code: 'CVG-096732',
+      description: 'Shoes',
+      quantity: '1',
+      amount: { value },
+      totalAmount: { value }
+    }],
+    buyer: {
+      firstName: 'Francis',
+      lastName: 'Gonzales',
+      contact: { email: 'maya.juan@mail.com', phone: '+639180000123' }
+    },
+    redirectUrl: {
+      success: base + '/success?id=' + rrn,
+      failure: base + '/failure?id=' + rrn,
+      cancel:  base + '/cancel?id=' + rrn
+    },
+    requestReferenceNumber: rrn
+  };
+
+  try {
+    const res = await fetch('/checkout/v1/checkouts', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    const body = await res.json();
+
+    if (!res.ok) {
+      const detail = body.error || JSON.stringify(body);
+      const err = $('err');
+      err.hidden = false;
+      err.innerHTML = '<strong>Gateway returned ' + res.status + '</strong>' +
+        String(detail).replace(/[<>&]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c]));
+      btn.disabled = false;
+      btn.textContent = 'Pay with Maya';
+      return;
+    }
+
+    $('checkoutId').textContent = body.checkoutId;
+    $('redirectUrl').textContent = body.redirectUrl;
+    $('redirectUrl').href = body.redirectUrl;
+    $('rrn').textContent = rrn;
+    $('out').hidden = false;
+
+    let n = 3;
+    $('count').textContent = '(' + n + ')';
+    const tick = setInterval(() => {
+      n -= 1;
+      if (n <= 0) {
+        clearInterval(tick);
+        location.href = body.redirectUrl;
+        return;
+      }
+      $('count').textContent = '(' + n + ')';
+    }, 1000);
+
+    $('pending').hidden = false;
+    $('redirectUrl').addEventListener('click', () => clearInterval(tick));
+  } catch (e) {
+    const err = $('err');
+    err.hidden = false;
+    err.innerHTML = '<strong>Request failed</strong>' + e.message;
+    btn.disabled = false;
+    btn.textContent = 'Pay with Maya';
+  }
+});
+</script>
+</body>
+</html>
