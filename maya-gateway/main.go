@@ -1,11 +1,14 @@
 package main
 
 import (
+	"context"
+	"database/sql"
 	"embed"
 	"errors"
 	"log"
 	"net/http"
 	"os"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
@@ -28,8 +31,22 @@ func servePage(name string) gin.HandlerFunc {
 	}
 }
 
+// buyerName joins the buyer name parts Maya accepts, skipping absent ones.
+func buyerName(b *models.Buyer) string {
+	if b == nil {
+		return ""
+	}
+	parts := make([]string, 0, 3)
+	for _, p := range []string{b.FirstName, b.MiddleName, b.LastName} {
+		if p = strings.TrimSpace(p); p != "" {
+			parts = append(parts, p)
+		}
+	}
+	return strings.Join(parts, " ")
+}
+
 /* --- Perform checkout via maya --- */
-func checkoutMaya(maya *models.Maya) gin.HandlerFunc {
+func checkoutMaya(maya *models.Maya, pool *sql.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		var req models.CreateCheckoutRequest
 		if err := c.ShouldBindJSON(&req); err != nil {
@@ -46,6 +63,22 @@ func checkoutMaya(maya *models.Maya) gin.HandlerFunc {
 			}
 			c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
 			return
+		}
+
+		// The checkout exists at Maya whether or not we record it, so a database
+		// failure must not fail the request.
+		amount, currency := 0.0, ""
+		if req.TotalAmount != nil {
+			amount, currency = req.TotalAmount.Value, req.TotalAmount.Currency
+		}
+		if err := db.InsertCheckout(c.Request.Context(), pool, db.Transaction{
+			CheckoutID:  checkout.CheckoutID,
+			Amount:      amount,
+			Currency:    currency,
+			BuyerName:   buyerName(req.Buyer),
+			RedirectURL: checkout.RedirectURL,
+		}); err != nil {
+			log.Printf("record checkout %s: %v", checkout.CheckoutID, err)
 		}
 
 		c.JSON(http.StatusOK, checkout)
@@ -83,14 +116,26 @@ func main() {
 	)
 
 	/* --- Initialize Database --- */
-	if err := db.MigrateUp(db.ConfigFromEnv(), "db/migrations"); err != nil {
+	cfg := db.ConfigFromEnv()
+
+	pool, err := db.Connect(context.Background(), cfg)
+	if err != nil {
+		log.Fatalf("connect database: %v", err)
+	}
+	defer pool.Close()
+
+	if err := db.MigrateUp(cfg, "db/migrations"); err != nil {
 		log.Fatalf("migrate database: %v", err)
+	}
+
+	if err := db.RequireTable(context.Background(), pool, "transactions"); err != nil {
+		log.Fatalf("schema: %v", err)
 	}
 
 	router := gin.Default()
 
 	checkout := router.Group("/checkout")
-	checkout.POST("/v1/checkouts", checkoutMaya(maya))
+	checkout.POST("/v1/checkouts", checkoutMaya(maya, pool))
 	checkout.GET("/v1/checkouts/:id", checkoutStatusMaya(maya))
 
 	result := servePage("result.html")

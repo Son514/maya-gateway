@@ -94,3 +94,21 @@ func MigrateUp(cfg Config, path string) error {
 
 	return nil
 }
+
+// RequireTable fails if the named table is missing after migrations have run.
+// golang-migrate trusts its own version ledger, so a table dropped by hand is
+// invisible to it: Up() reports no change and the schema silently drifts.
+func RequireTable(ctx context.Context, pool *sql.DB, table string) error {
+	var name *string
+	if err := pool.QueryRowContext(ctx,
+		`SELECT to_regclass($1)::text`, table,
+	).Scan(&name); err != nil {
+		return err
+	}
+
+	if name == nil {
+		return fmt.Errorf("table %q is missing after migrations", table)
+	}
+
+	return nil
+}

@@ -9,6 +9,8 @@ mirrors Maya's upstream paths so a client can call it directly without knowing t
 - Maya sandbox API keys from the [Maya Business Manager](https://pbm.paymaya.com/)
 - A reachable PostgreSQL server. The gateway connects, pings, and runs migrations on startup, exiting
   if any step fails.
+- [golang-migrate](https://github.com/golang-migrate/migrate) CLI v4.20.1, only if you want to run
+  migrations by hand. The server applies them on boot without it.
 
 ## Setup
 
@@ -16,7 +18,13 @@ mirrors Maya's upstream paths so a client can call it directly without knowing t
 git clone <repo-url>
 cd maya-gateway
 go mod download
+
+# migration CLI, pinned to the same version the server uses
+go install -tags postgres github.com/golang-migrate/migrate/v4/cmd/migrate@v4.20.1
 ```
+
+The CLI installs to `$GOPATH/bin` (`~/go/bin`). Make sure that directory is on your `PATH`; it is not
+by default on a bare shell or a CI runner, which would report `migrate: command not found`.
 
 ## Environment Variables
 
@@ -85,8 +93,8 @@ Maya returns **two** status fields with different vocabularies:
 
 The single `status` column is intended to hold Maya's **`paymentStatus`**, since that is the one
 that answers whether a payment succeeded. It is not a faithful mirror of either upstream field, and
-Maya's `status` is not stored. Nothing writes the column yet, so the `PENDING` default is all that
-appears today.
+Maya's `status` is not stored. Insert only writes `PENDING` today, so every row holds that until
+status updates are implemented.
 
 ### Migrations
 
@@ -94,19 +102,92 @@ Files live in `db/migrations/` and use [golang-migrate](https://github.com/golan
 naming, `000001_create_transactions.up.sql` / `.down.sql`. They are applied automatically on boot and
 are idempotent, so restarting is safe.
 
-To manage them by hand instead:
+To run them by hand instead of on boot, use the `make` targets. They work from either the repository
+root or `maya-gateway/`; the connection string is assembled from the `DB_*` values in `.env`.
 
 ```bash
-migrate -path db/migrations \
-  -database "postgres://$DB_USER:$DB_PASSWORD@$DB_HOST:$DB_PORT/$DB_NAME?sslmode=disable" up
+make help              # list targets
+make migrate-up        # apply all pending migrations
+make migrate-down      # roll back the most recent migration
+make migrate-version   # print the recorded version
+make migrate-create M=add_refunds   # scaffold a new pair in db/migrations/
 ```
 
-`down` asks for confirmation. Applied versions are tracked in `schema_migrations`.
+Scaffolding produces a UTC-timestamped filename (`20261002050019_add_refunds.up.sql`), which cannot
+collide with an existing file. `down` asks for confirmation. Applied versions are tracked in
+`schema_migrations`.
+
+Two notes on the CLI itself:
+
+- `migrate -version` prints `dev` for a `go install`ed build, so it does not confirm the version. The
+  `@v4.20.1` in the install command is what pins it.
+- `unknown driver postgres` means the CLI was built without `-tags postgres`. golang-migrate compiles
+  its drivers behind build tags, so reinstall with the tag.
 
 ### Writes
 
-None yet. The table exists but nothing reads or writes it, so it stays empty. No route touches the
-database, which means a database outage will not affect the payment endpoints.
+| Route | Write |
+|---|---|
+| `POST /checkout/v1/checkouts` | `INSERT`, status left at the `PENDING` default |
+| `GET /checkout/v1/checkouts/:id` | None. Reads Maya directly |
+
+Amount, currency and buyer name come from the **create request**, because Maya's create response
+returns only `checkoutId` and `redirectUrl`. Buyer name is `firstName middleName lastName` joined,
+stored as `NULL` when absent.
+
+**Startup verifies the schema.** After migrating, boot checks that `transactions` actually exists and
+exits if it does not. golang-migrate records applied versions in `schema_migrations` and trusts that
+ledger, so a table dropped by hand is invisible to it: migrations report "no change" and the app starts
+with writes quietly failing. The check turns that silent failure into a startup error.
+
+**If the ledger and the schema disagree.** golang-migrate trusts `schema_migrations` and never checks
+that the objects it created still exist, so a hand-dropped table is invisible to it. Two ways to recover:
+
+Reset the ledger so migration 1 runs again — use this when the table is missing:
+
+```bash
+psql -c "DROP FUNCTION IF EXISTS set_updated_at();"   # DROP TABLE leaves the function behind
+make migrate-force      # V=-1 resets to "no version applied"
+make migrate-up
+```
+
+`migrate-force` with no `V` resets to `-1`, meaning "no version applied". Plain `force 0` fails: `0` is
+a real version number, so migrate reports `no migration found for version 0`. The Makefile also
+supplies the `--` that `-1` requires, since migrate's flag parser would otherwise reject it.
+
+Force only when the ledger is wrong. Forcing while the table still exists makes `migrate-up` fail on
+`relation already exists`, which re-dirties the ledger and leaves things worse than you found them.
+
+Or skip the ledger entirely — use this when the table is missing but the ledger is already correct.
+It cannot leave the ledger inconsistent:
+
+```bash
+psql -d "$DB_NAME" -f db/migrations/000001_create_transactions.up.sql
+```
+
+The `.up.sql` files have no `IF NOT EXISTS` guards, so this fails on a second run. Prefer
+`make migrate-up` when you just need the migration applied.
+
+**Clearing a `dirty` ledger.** A migration that fails partway leaves `version` marked `dirty=true`,
+which blocks every subsequent `up` and `down`. Only the flag needs clearing — the SQL that ran is still
+in place:
+
+```bash
+make migrate-force V=1   # clear dirty, keep the claim that v1 is applied
+```
+
+Force `1` rather than `-1` here. Forcing `-1` discards the claim, leaving `down` with nothing to roll
+back.
+
+Prefer `make migrate-down` over dropping tables by hand — it keeps the ledger in step.
+
+**A failed write never fails the request.** The checkout already exists at Maya with a live
+`redirectUrl` that will accept payment, so reporting an error would misdescribe a valid payment. Write
+failures are logged instead. Note this is only reachable once the app is running — an unreachable
+database is still fatal at startup, because `Connect` and `MigrateUp` both run before the router.
+
+Nothing reads the table yet, and status is never updated, so every row stays `PENDING`. Maya remains
+the source of truth for payment status.
 
 `sslmode=disable` is set explicitly, which suits a local sandbox server with no TLS certificate. Any
 deployment where the connection leaves the machine should use `require` or `verify-full` instead.
