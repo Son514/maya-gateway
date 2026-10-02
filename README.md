@@ -7,6 +7,7 @@ mirrors Maya's upstream paths so a client can call it directly without knowing t
 
 - Go 1.27.0
 - Maya sandbox API keys from the [Maya Business Manager](https://pbm.paymaya.com/)
+- A reachable PostgreSQL server. The gateway connects and pings on startup and exits if it fails.
 
 ## Setup
 
@@ -26,8 +27,13 @@ reads from the process working directory, so the binary must be run from inside 
 | `MAYA_BASE_URL` | Yes | Maya API host. Sandbox: `https://pg-sandbox.paymaya.com`, production: `https://pg.paymaya.com` |
 | `MAYA_PUBLIC_KEY` | Yes | Public API key (`pk-...`). Used for Basic auth on checkout endpoints. |
 | `MAYA_SECRET_KEY` | Yes | Secret API key (`sk-...`). Used for Basic auth on Get Checkout. |
+| `DB_HOST` | Yes | PostgreSQL host, e.g. `localhost` |
+| `DB_PORT` | Yes | PostgreSQL port, e.g. `5432` |
+| `DB_USER` | Yes | PostgreSQL role |
+| `DB_PASSWORD` | Yes | Password for that role |
+| `DB_NAME` | Yes | Database name |
 
-The app exits at startup if `.env` cannot be read.
+The app exits at startup if `.env` cannot be read, or if it cannot reach the database.
 
 ## Run
 
@@ -41,6 +47,17 @@ checkout and redirects into Maya's hosted payment page.
 
 The pages are embedded into the binary via `go:embed`, so they are served regardless of working
 directory. Edits to `web/*.html` require a restart (`go run .`) to take effect.
+
+## Database
+
+`db.Connect` builds a PostgreSQL connection string from the `DB_*` variables and verifies it with a
+5-second ping. The gateway exits on failure rather than starting in a degraded state.
+
+There is no schema and no migrations. The connection is established but nothing reads from it yet —
+the payment routes do not touch the database, so an outage there will not affect them.
+
+`sslmode=disable` is set explicitly, which suits a local sandbox server with no TLS certificate. Any
+deployment where the connection leaves the machine should use `require` or `verify-full` instead.
 
 ## Demo Pages
 
@@ -203,3 +220,6 @@ the same `value` shape used on the request.
 - `GET /payments/v1/payments/{paymentId}` and `GET /payments/v1/payments/{paymentId}/status` are
   Maya's newer payment retrieval endpoints. Both are reachable from the same client, but only
   `/checkout/v1/checkouts/{id}` is proxied today.
+- The gateway has no authentication of its own. Get Checkout authenticates upstream with the Maya
+  secret key, so anything able to reach the port can retrieve checkout status. Fine for local
+  development, not suitable for exposure as-is.

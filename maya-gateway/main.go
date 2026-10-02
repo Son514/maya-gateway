@@ -1,7 +1,7 @@
 package main
 
-// TODO: US-203: Call Maya's "Get Checkout Status" API
 import (
+	"context"
 	"embed"
 	"errors"
 	"log"
@@ -11,6 +11,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
 
+	"son514/maya-gateway/maya-gateway/db"
 	"son514/maya-gateway/maya-gateway/models"
 )
 
@@ -28,6 +29,7 @@ func servePage(name string) gin.HandlerFunc {
 	}
 }
 
+/* --- Perform checkout via maya --- */
 func checkoutMaya(maya *models.Maya) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		var req models.CreateCheckoutRequest
@@ -51,6 +53,7 @@ func checkoutMaya(maya *models.Maya) gin.HandlerFunc {
 	}
 }
 
+/* --- Verify the maya checkout status --- */
 func checkoutStatusMaya(maya *models.Maya) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		checkout, err := maya.GetCheckout(c.Request.Context(), c.Param("id"))
@@ -73,11 +76,19 @@ func main() {
 		log.Fatalf("load .env: %v", err)
 	}
 
+	/* --- Initialize Maya --- */
 	maya := models.NewMaya(
 		os.Getenv("MAYA_BASE_URL"),
 		os.Getenv("MAYA_PUBLIC_KEY"),
 		os.Getenv("MAYA_SECRET_KEY"),
 	)
+
+	/* --- Initialize Database --- */
+	pool, err := db.Connect(context.Background(), db.ConfigFromEnv())
+	if err != nil {
+		log.Fatalf("connect database: %v", err)
+	}
+	defer pool.Close()
 
 	router := gin.Default()
 
