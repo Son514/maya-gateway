@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"embed"
 	"errors"
 	"log"
@@ -84,11 +83,9 @@ func main() {
 	)
 
 	/* --- Initialize Database --- */
-	pool, err := db.Connect(context.Background(), db.ConfigFromEnv())
-	if err != nil {
-		log.Fatalf("connect database: %v", err)
+	if err := db.MigrateUp(db.ConfigFromEnv(), "db/migrations"); err != nil {
+		log.Fatalf("migrate database: %v", err)
 	}
-	defer pool.Close()
 
 	router := gin.Default()
 

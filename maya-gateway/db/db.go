@@ -3,11 +3,17 @@ package db
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"time"
 
-	_ "github.com/lib/pq" // registers the "postgres" driver with database/sql
+	"github.com/golang-migrate/migrate/v4"
+	// registers the "postgres" driver with database/sql and golang-migrate
+	_ "github.com/golang-migrate/migrate/v4/database/postgres"
+	_ "github.com/golang-migrate/migrate/v4/source/file"
+	_ "github.com/lib/pq"
 )
 
 // Config holds the values needed to build a PostgreSQL connection string.
@@ -30,15 +36,33 @@ func ConfigFromEnv() Config {
 	}
 }
 
+// dsn returns a key/value connection string for lib/pq.
+func (c Config) dsn() string {
+	return fmt.Sprintf(
+		"host=%s port=%s user=%s password=%s dbname=%s sslmode=disable",
+		c.Host, c.Port, c.User, c.Password, c.Name,
+	)
+}
+
+// url returns a connection URL for golang-migrate, which takes a URL rather
+// than a key/value string.
+func (c Config) url() string {
+	u := &url.URL{
+		Scheme: "postgres",
+		User:   url.UserPassword(c.User, c.Password),
+		Host:   c.Host + ":" + c.Port,
+		Path:   c.Name,
+	}
+	q := u.Query()
+	q.Set("sslmode", "disable")
+	u.RawQuery = q.Encode()
+	return u.String()
+}
+
 // Connect opens a pool and verifies it is reachable. The returned *sql.DB is a
 // connection pool: create it once and share it, never per request.
 func Connect(ctx context.Context, cfg Config) (*sql.DB, error) {
-	dsn := fmt.Sprintf(
-		"host=%s port=%s user=%s password=%s dbname=%s sslmode=disable",
-		cfg.Host, cfg.Port, cfg.User, cfg.Password, cfg.Name,
-	)
-
-	pool, err := sql.Open("postgres", dsn)
+	pool, err := sql.Open("postgres", cfg.dsn())
 	if err != nil {
 		return nil, err
 	}
@@ -52,4 +76,21 @@ func Connect(ctx context.Context, cfg Config) (*sql.DB, error) {
 	}
 
 	return pool, nil
+}
+
+// MigrateUp applies every pending migration in path. It is safe to call on each
+// boot: golang-migrate records applied versions in schema_migrations.
+func MigrateUp(cfg Config, path string) error {
+	m, err := migrate.New("file://"+path, cfg.url())
+	if err != nil {
+		return err
+	}
+	defer m.Close()
+
+	// ErrNoChange means the database is already at the latest version.
+	if err := m.Up(); err != nil && !errors.Is(err, migrate.ErrNoChange) {
+		return err
+	}
+
+	return nil
 }

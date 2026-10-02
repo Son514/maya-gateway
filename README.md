@@ -7,7 +7,8 @@ mirrors Maya's upstream paths so a client can call it directly without knowing t
 
 - Go 1.27.0
 - Maya sandbox API keys from the [Maya Business Manager](https://pbm.paymaya.com/)
-- A reachable PostgreSQL server. The gateway connects and pings on startup and exits if it fails.
+- A reachable PostgreSQL server. The gateway connects, pings, and runs migrations on startup, exiting
+  if any step fails.
 
 ## Setup
 
@@ -33,7 +34,8 @@ reads from the process working directory, so the binary must be run from inside 
 | `DB_PASSWORD` | Yes | Password for that role |
 | `DB_NAME` | Yes | Database name |
 
-The app exits at startup if `.env` cannot be read, or if it cannot reach the database.
+The app exits at startup if `.env` cannot be read, if it cannot reach the database, or if a
+migration fails.
 
 ## Run
 
@@ -53,8 +55,58 @@ directory. Edits to `web/*.html` require a restart (`go run .`) to take effect.
 `db.Connect` builds a PostgreSQL connection string from the `DB_*` variables and verifies it with a
 5-second ping. The gateway exits on failure rather than starting in a degraded state.
 
-There is no schema and no migrations. The connection is established but nothing reads from it yet —
-the payment routes do not touch the database, so an outage there will not affect them.
+### Schema
+
+One table, `transactions`, records every checkout the gateway creates.
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | `UUID` | Primary key, `gen_random_uuid()` |
+| `checkout_id` | `VARCHAR(255)` | Unique, not null. Maya's `checkoutId` |
+| `amount` | `DECIMAL(10,2)` | Not null |
+| `currency` | `VARCHAR(3)` | Not null, defaults to `PHP` |
+| `status` | `VARCHAR(32)` | Not null, defaults to `PENDING`. See below |
+| `buyer_name` | `VARCHAR(255)` | `firstName middleName lastName` joined, null if absent |
+| `redirect_url` | `TEXT` | Maya's hosted checkout URL |
+| `created_at` | `TIMESTAMPTZ` | Not null, defaults to `NOW()` |
+| `updated_at` | `TIMESTAMPTZ` | Not null, maintained by trigger |
+
+`updated_at` is kept current by the `transactions_set_updated_at` trigger, so an ordinary `UPDATE`
+moves it without help from the application.
+
+### The status column holds a flattened field
+
+Maya returns **two** status fields with different vocabularies:
+
+| Maya field | Values |
+|---|---|
+| `status` | `CREATED`, `EXPIRED` |
+| `paymentStatus` | `PENDING_TOKEN`, `PAYMENT_SUCCESS`, `PAYMENT_FAILED`, `PAYMENT_CANCELLED`, `FOR_AUTHENTICATION`, `AUTHORIZED`, … |
+
+The single `status` column is intended to hold Maya's **`paymentStatus`**, since that is the one
+that answers whether a payment succeeded. It is not a faithful mirror of either upstream field, and
+Maya's `status` is not stored. Nothing writes the column yet, so the `PENDING` default is all that
+appears today.
+
+### Migrations
+
+Files live in `db/migrations/` and use [golang-migrate](https://github.com/golang-migrate/migrate)
+naming, `000001_create_transactions.up.sql` / `.down.sql`. They are applied automatically on boot and
+are idempotent, so restarting is safe.
+
+To manage them by hand instead:
+
+```bash
+migrate -path db/migrations \
+  -database "postgres://$DB_USER:$DB_PASSWORD@$DB_HOST:$DB_PORT/$DB_NAME?sslmode=disable" up
+```
+
+`down` asks for confirmation. Applied versions are tracked in `schema_migrations`.
+
+### Writes
+
+None yet. The table exists but nothing reads or writes it, so it stays empty. No route touches the
+database, which means a database outage will not affect the payment endpoints.
 
 `sslmode=disable` is set explicitly, which suits a local sandbox server with no TLS certificate. Any
 deployment where the connection leaves the machine should use `require` or `verify-full` instead.
