@@ -28,8 +28,15 @@ by default on a bare shell or a CI runner, which would report `migrate: command 
 
 ## Environment Variables
 
-Create a `.env` file inside `maya-gateway/`. It is loaded at startup by `godotenv.Load()`, which
-reads from the process working directory, so the binary must be run from inside `maya-gateway/`.
+Create a `.env` file inside `maya-gateway/`, starting from the committed template:
+
+```bash
+cp .env.example .env
+```
+
+It is loaded at startup by `godotenv.Load()`, which reads from the process working directory, so the
+binary must be run from inside `maya-gateway/`. `.env` is gitignored; `.env.example` holds placeholder
+values only.
 
 | Key | Required | Description |
 |---|---|---|
@@ -91,10 +98,13 @@ Maya returns **two** status fields with different vocabularies:
 | `status` | `CREATED`, `EXPIRED` |
 | `paymentStatus` | `PENDING_TOKEN`, `PAYMENT_SUCCESS`, `PAYMENT_FAILED`, `PAYMENT_CANCELLED`, `FOR_AUTHENTICATION`, `AUTHORIZED`, … |
 
-The single `status` column is intended to hold Maya's **`paymentStatus`**, since that is the one
-that answers whether a payment succeeded. It is not a faithful mirror of either upstream field, and
-Maya's `status` is not stored. Insert only writes `PENDING` today, so every row holds that until
-status updates are implemented.
+The single `status` column holds Maya's **`paymentStatus`**, since that is the one that answers
+whether a payment succeeded. It is not a faithful mirror of either upstream field, and Maya's `status`
+is not stored.
+
+`INSERT` writes `PENDING` and `GET /checkout/v1/checkouts/:id` replaces it with Maya's current
+`paymentStatus`, so the two values will not match even though they came from different vocabularies.
+A row that has never been read keeps the `PENDING` placeholder.
 
 ### Migrations
 
@@ -129,11 +139,22 @@ Two notes on the CLI itself:
 | Route | Write |
 |---|---|
 | `POST /checkout/v1/checkouts` | `INSERT`, status left at the `PENDING` default |
-| `GET /checkout/v1/checkouts/:id` | None. Reads Maya directly |
+| `GET /checkout/v1/checkouts/:id` | `UPDATE` status from Maya's `paymentStatus` |
 
 Amount, currency and buyer name come from the **create request**, because Maya's create response
 returns only `checkoutId` and `redirectUrl`. Buyer name is `firstName middleName lastName` joined,
 stored as `NULL` when absent.
+
+`GET` refreshes the stored status from Maya's `paymentStatus`, which is what answers whether money
+moved. Maya's separate `status` field is not stored. The update is keyed on the ID Maya echoes back,
+not the URL parameter, so it cannot land on a different row.
+
+**Status is only as fresh as the last lookup.** Nothing polls, so a row stays `PENDING` until someone
+reads it, even if the payment completed hours earlier. Maya remains the source of truth; this table is
+a local record, not a cache of Maya's state.
+
+A checkout that exists at Maya but has no local row is logged and skipped — the read still returns
+Maya's response. Nothing is created on the fly, since the gateway would not own that record.
 
 **Startup verifies the schema.** After migrating, boot checks that `transactions` actually exists and
 exits if it does not. golang-migrate records applied versions in `schema_migrations` and trusts that

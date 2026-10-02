@@ -25,3 +25,22 @@ func InsertCheckout(ctx context.Context, pool *sql.DB, t Transaction) error {
 	)
 	return err
 }
+
+// UpdateStatus records Maya's paymentStatus for a checkout. It reports whether a
+// row matched, so callers can tell an unknown checkout from a write failure.
+func UpdateStatus(ctx context.Context, pool *sql.DB, checkoutID, status string) (bool, error) {
+	tag, err := pool.ExecContext(ctx,
+		`UPDATE transactions SET status = $2 WHERE checkout_id = $1`,
+		checkoutID, status,
+	)
+	if err != nil {
+		return false, err
+	}
+
+	affected, err := tag.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+
+	return affected > 0, nil
+}

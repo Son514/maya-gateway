@@ -86,7 +86,7 @@ func checkoutMaya(maya *models.Maya, pool *sql.DB) gin.HandlerFunc {
 }
 
 /* --- Verify the maya checkout status --- */
-func checkoutStatusMaya(maya *models.Maya) gin.HandlerFunc {
+func checkoutStatusMaya(maya *models.Maya, pool *sql.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		checkout, err := maya.GetCheckout(c.Request.Context(), c.Param("id"))
 		if err != nil {
@@ -97,6 +97,15 @@ func checkoutStatusMaya(maya *models.Maya) gin.HandlerFunc {
 			}
 			c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
 			return
+		}
+
+		// Maya's answer is current whether or not we record it, so a database
+		// failure must not fail the read. Keyed on the ID Maya echoed rather than
+		// the URL parameter, so the update cannot land on a different row.
+		if ok, err := db.UpdateStatus(c.Request.Context(), pool, checkout.ID, checkout.PaymentStatus); err != nil {
+			log.Printf("update status %s: %v", checkout.ID, err)
+		} else if !ok {
+			log.Printf("update status %s: no local row, skipped", checkout.ID)
 		}
 
 		c.JSON(http.StatusOK, checkout)
@@ -136,7 +145,7 @@ func main() {
 
 	checkout := router.Group("/checkout")
 	checkout.POST("/v1/checkouts", checkoutMaya(maya, pool))
-	checkout.GET("/v1/checkouts/:id", checkoutStatusMaya(maya))
+	checkout.GET("/v1/checkouts/:id", checkoutStatusMaya(maya, pool))
 
 	result := servePage("result.html")
 	router.GET("/", servePage("index.html"))
